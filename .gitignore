@@ -1,0 +1,15 @@
+# secrets and data
+.env
+*.sql
+# python
+venv/
+__pycache__/
+# scratch and backups
+*.bak
+patch_*.py
+/*.txt
+backend/new_*.txt
+# stray files in dairy_app
+dairy_app/dart:*
+dairy_app/http
+dairy_app/p
