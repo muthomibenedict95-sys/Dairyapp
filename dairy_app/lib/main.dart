@@ -159,7 +159,8 @@ class _HomePageState extends State<HomePage> {
   Future<void> load() async {
     final rows = await db.rawQuery('''
       SELECT c.id, c.name, c.tag, COALESCE(SUM(m.litres), 0) AS today
-      FROM cows c LEFT JOIN milk m ON m.cow_id = c.id AND m.date = ?
+      FROM cows c LEFT JOIN milk m ON m.cow_id = c.id AND m.date = ? AND m.deleted = 0
+      WHERE c.deleted = 0
       GROUP BY c.id ORDER BY c.name''', [today()]);
     final pc = Sqflite.firstIntValue(await db.rawQuery(
             'SELECT (SELECT COUNT(*) FROM cows WHERE synced = 0) + (SELECT COUNT(*) FROM milk WHERE synced = 0)')) ??
@@ -209,37 +210,77 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
+  String defaultSession() {
+    final h = DateTime.now().hour;
+    if (h < 10) return 'morning';
+    if (h < 15) return 'midday';
+    return 'evening';
+  }
+
   Future<void> addMilk(String cowId, String cowName) async {
     final litres = TextEditingController();
+    var session = defaultSession();
     final ok = await showDialog<bool>(
       context: context,
-      builder: (_) => AlertDialog(
-        title: Text('Milk from $cowName'),
-        content: TextField(
-          controller: litres,
-          keyboardType: const TextInputType.numberWithOptions(decimal: true),
-          decoration: const InputDecoration(labelText: 'Litres'),
+      builder: (_) => StatefulBuilder(
+        builder: (context, setLocal) => AlertDialog(
+          title: Text('Milk from $cowName'),
+          content: Column(mainAxisSize: MainAxisSize.min, children: [
+            Wrap(spacing: 8, children: [
+              for (final s in ['morning', 'midday', 'evening'])
+                ChoiceChip(
+                  label: Text(s[0].toUpperCase() + s.substring(1)),
+                  selected: session == s,
+                  onSelected: (_) => setLocal(() => session = s),
+                ),
+            ]),
+            TextField(
+              controller: litres,
+              keyboardType: const TextInputType.numberWithOptions(decimal: true),
+              decoration: const InputDecoration(labelText: 'Litres'),
+            ),
+          ]),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+            FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Save')),
+          ],
         ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
-          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Save')),
-        ],
       ),
     );
-    final value = double.tryParse(litres.text);
-    if (ok == true && value != null) {
+    if (ok != true || !mounted) return;
+    final value = double.tryParse(litres.text.trim().replaceAll(',', '.'));
+    if (value == null || value <= 0 || value > 50) {
+      ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Enter litres between 0 and 50')));
+      return;
+    }
+    final existing = await db.query('milk',
+        where: 'cow_id = ? AND session = ? AND date = ? AND deleted = 0',
+        whereArgs: [cowId, session, today()]);
+    String msg;
+    if (existing.isEmpty) {
       await db.insert('milk', {
         'id': uuid.v4(),
         'cow_id': cowId,
         'litres': value,
-        'session': DateTime.now().hour < 12 ? 'morning' : 'evening',
+        'session': session,
         'date': today(),
         'updated_at': nowMs(),
         'synced': 0,
+        'deleted': 0,
       });
-      await load();
-      syncNow(silent: true);
+      msg = 'Saved $session milk';
+    } else {
+      await db.update('milk',
+          {'litres': value, 'updated_at': nowMs(), 'synced': 0},
+          where: 'id = ?', whereArgs: [existing.first['id']]);
+      msg = 'Updated $session milk (was ${existing.first['litres']} L)';
     }
+    await load();
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+    }
+    syncNow(silent: true);
   }
 
   Future<void> editServer() async {
