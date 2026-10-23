@@ -22,7 +22,7 @@ Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   db = await openDatabase(
     p.join(await getDatabasesPath(), 'dairy_v2.db'),
-    version: 2,
+    version: 3,
     onCreate: (d, v) async {
       // id is a UUID made on the phone; synced: 0 = pending, 1 = on server.
       await d.execute('''
@@ -32,6 +32,7 @@ Future<void> main() async {
           tag TEXT NOT NULL DEFAULT '',
           updated_at INTEGER NOT NULL,
           synced INTEGER NOT NULL DEFAULT 0,
+          removed_reason TEXT NOT NULL DEFAULT '',
           deleted INTEGER NOT NULL DEFAULT 0
         )''');
       await d.execute('''
@@ -53,6 +54,9 @@ Future<void> main() async {
       if (oldV < 2) {
         await d.execute('ALTER TABLE cows ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0');
         await d.execute('ALTER TABLE milk ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0');
+      }
+      if (oldV < 3) {
+        await d.execute("ALTER TABLE cows ADD COLUMN removed_reason TEXT NOT NULL DEFAULT ''");
       }
     },
   );
