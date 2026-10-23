@@ -22,7 +22,7 @@ Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   db = await openDatabase(
     p.join(await getDatabasesPath(), 'dairy_v2.db'),
-    version: 1,
+    version: 2,
     onCreate: (d, v) async {
       // id is a UUID made on the phone; synced: 0 = pending, 1 = on server.
       await d.execute('''
@@ -31,7 +31,8 @@ Future<void> main() async {
           name TEXT NOT NULL,
           tag TEXT NOT NULL DEFAULT '',
           updated_at INTEGER NOT NULL,
-          synced INTEGER NOT NULL DEFAULT 0
+          synced INTEGER NOT NULL DEFAULT 0,
+          deleted INTEGER NOT NULL DEFAULT 0
         )''');
       await d.execute('''
         CREATE TABLE milk(
@@ -41,11 +42,18 @@ Future<void> main() async {
           session TEXT NOT NULL,
           date TEXT NOT NULL,
           updated_at INTEGER NOT NULL,
-          synced INTEGER NOT NULL DEFAULT 0
+          synced INTEGER NOT NULL DEFAULT 0,
+          deleted INTEGER NOT NULL DEFAULT 0
         )''');
       await d.execute('CREATE INDEX idx_milk_synced ON milk(synced)');
       await d.execute('CREATE INDEX idx_cows_synced ON cows(synced)');
       await d.execute('CREATE TABLE settings(key TEXT PRIMARY KEY, value TEXT)');
+    },
+    onUpgrade: (d, oldV, newV) async {
+      if (oldV < 2) {
+        await d.execute('ALTER TABLE cows ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0');
+        await d.execute('ALTER TABLE milk ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0');
+      }
     },
   );
   runApp(const DairyApp());
