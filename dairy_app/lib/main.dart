@@ -299,7 +299,7 @@ class _HomePageState extends State<HomePage> {
           ),
           ListTile(
             leading: const Icon(Icons.delete),
-            title: Text('Delete $name'),
+            title: Text('Remove $name'),
             onTap: () => Navigator.pop(context, 'delete'),
           ),
         ]),
@@ -338,21 +338,46 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> deleteCow(String id, String name) async {
+    String? reason;
     final ok = await showDialog<bool>(
       context: context,
-      builder: (_) => AlertDialog(
-        title: Text('Delete $name?'),
-        content: const Text('Her milk records stay in your history.'),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
-          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Delete')),
-        ],
+      builder: (_) => StatefulBuilder(
+        builder: (context, setLocal) => AlertDialog(
+          title: Text('Remove $name?'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('Why is she leaving the herd?'),
+              const SizedBox(height: 8),
+              Wrap(spacing: 8, children: [
+                for (final r in ['sold', 'died', 'other'])
+                  ChoiceChip(
+                    label: Text(r[0].toUpperCase() + r.substring(1)),
+                    selected: reason == r,
+                    onSelected: (_) => setLocal(() => reason = r),
+                  ),
+              ]),
+              const SizedBox(height: 12),
+              const Text('Her milk records stay in your history.'),
+            ],
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+            FilledButton(
+              onPressed: reason == null ? null : () => Navigator.pop(context, true),
+              child: const Text('Remove'),
+            ),
+          ],
+        ),
       ),
     );
-    if (ok != true) return;
-    final now = nowMs();
-    await db.update('cows', {'deleted': 1, 'updated_at': now, 'synced': 0},
-        where: 'id = ?', whereArgs: [id]);
+    if (ok != true || reason == null) return;
+    await db.update(
+        'cows',
+        {'deleted': 1, 'removed_reason': reason, 'updated_at': nowMs(), 'synced': 0},
+        where: 'id = ?',
+        whereArgs: [id]);
     await load();
     syncNow(silent: true);
   }
