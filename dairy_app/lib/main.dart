@@ -283,6 +283,76 @@ class _HomePageState extends State<HomePage> {
     syncNow(silent: true);
   }
 
+  Future<void> cowMenu(String id, String name, String tag) async {
+    final choice = await showModalBottomSheet<String>(
+      context: context,
+      builder: (_) => SafeArea(
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          ListTile(
+            leading: const Icon(Icons.edit),
+            title: Text('Edit $name'),
+            onTap: () => Navigator.pop(context, 'edit'),
+          ),
+          ListTile(
+            leading: const Icon(Icons.delete),
+            title: Text('Delete $name'),
+            onTap: () => Navigator.pop(context, 'delete'),
+          ),
+        ]),
+      ),
+    );
+    if (!mounted) return;
+    if (choice == 'edit') await editCow(id, name, tag);
+    if (choice == 'delete') await deleteCow(id, name);
+  }
+
+  Future<void> editCow(String id, String name, String tag) async {
+    final n = TextEditingController(text: name);
+    final t = TextEditingController(text: tag);
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Edit cow'),
+        content: Column(mainAxisSize: MainAxisSize.min, children: [
+          TextField(controller: n, decoration: const InputDecoration(labelText: 'Name')),
+          TextField(controller: t, decoration: const InputDecoration(labelText: 'Tag number')),
+        ]),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Save')),
+        ],
+      ),
+    );
+    if (ok != true || n.text.trim().isEmpty) return;
+    await db.update(
+        'cows',
+        {'name': n.text.trim(), 'tag': t.text.trim(), 'updated_at': nowMs(), 'synced': 0},
+        where: 'id = ?',
+        whereArgs: [id]);
+    await load();
+    syncNow(silent: true);
+  }
+
+  Future<void> deleteCow(String id, String name) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: Text('Delete $name?'),
+        content: const Text('Her milk records stay in your history.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Delete')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final now = nowMs();
+    await db.update('cows', {'deleted': 1, 'updated_at': now, 'synced': 0},
+        where: 'id = ?', whereArgs: [id]);
+    await load();
+    syncNow(silent: true);
+  }
+
   Future<void> editServer() async {
     final c = TextEditingController(text: await getServerUrl());
     if (!mounted) return;
@@ -357,6 +427,7 @@ class _HomePageState extends State<HomePage> {
                       subtitle: Text('Tag: ${c['tag']}'),
                       trailing: Text('${(c['today'] as num).toStringAsFixed(1)} L'),
                       onTap: () => addMilk('${c['id']}', '${c['name']}'),
+                      onLongPress: () => cowMenu('${c['id']}', '${c['name']}', '${c['tag']}'),
                     ),
                 ]),
         ),
