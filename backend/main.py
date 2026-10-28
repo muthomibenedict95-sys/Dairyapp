@@ -1,5 +1,12 @@
 """Dairy App backend: FastAPI + async SQLAlchemy + MariaDB."""
 import os
+import re
+import asyncio
+import hashlib
+import secrets
+import uuid
+import bcrypt
+from sqlalchemy.exc import IntegrityError
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Header, HTTPException
@@ -63,6 +70,19 @@ ON DUPLICATE KEY UPDATE
 """
 
 
+
+def normalize_phone(raw: str) -> str:
+    """Turn 07xx, 01xx, 7xx or +254... into one standard form: +2547xxxxxxxx."""
+    digits = re.sub(r"\D", "", raw)
+    if digits.startswith("0"):
+        digits = "254" + digits[1:]
+    elif len(digits) == 9:
+        digits = "254" + digits
+    if not re.fullmatch(r"254[17]\d{8}", digits):
+        raise ValueError("Invalid phone number")
+    return "+" + digits
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     async with engine.begin() as conn:
@@ -85,6 +105,7 @@ class CowIn(BaseModel):
     name: str
     tag: str = ""
     updated_at: int
+    deleted: int = 0
 
 
 class MilkIn(BaseModel):
@@ -94,11 +115,45 @@ class MilkIn(BaseModel):
     session: str
     date: str  # YYYY-MM-DD
     updated_at: int
+    deleted: int = 0
 
 
 class SyncRequest(BaseModel):
     cows: list[CowIn] = []
     milk: list[MilkIn] = []
+
+
+class RegisterIn(BaseModel):
+    phone: str
+    pin: str
+
+
+def hash_token(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+@app.post("/api/register")
+async def register(body: RegisterIn):
+    try:
+        phone = normalize_phone(body.phone)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid phone number")
+    if not re.fullmatch(r"\d{4}", body.pin):
+        raise HTTPException(status_code=400, detail="PIN must be 4 digits")
+    hashed = await asyncio.to_thread(bcrypt.hashpw, body.pin.encode(), bcrypt.gensalt())
+    farmer_id = str(uuid.uuid4())
+    token = secrets.token_hex(32)
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("INSERT INTO farmers (id, phone, pin_hash, token) "
+                     "VALUES (:id, :phone, :pin_hash, :token)"),
+                {"id": farmer_id, "phone": phone,
+                 "pin_hash": hashed.decode(), "token": hash_token(token)},
+            )
+    except IntegrityError:
+        raise HTTPException(status_code=409, detail="This phone number is already registered")
+    return {"farmer_id": farmer_id, "token": token}
 
 
 @app.get("/api/health")
