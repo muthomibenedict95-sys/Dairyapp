@@ -162,7 +162,11 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> load() async {
     final rows = await db.rawQuery('''
-      SELECT c.id, c.name, c.tag, COALESCE(SUM(m.litres), 0) AS today
+      SELECT c.id, c.name, c.tag,
+        COALESCE(SUM(m.litres), 0) AS today,
+        COALESCE(SUM(CASE WHEN m.session = 'morning' THEN m.litres END), 0) AS morning,
+        COALESCE(SUM(CASE WHEN m.session = 'midday' THEN m.litres END), 0) AS midday,
+        COALESCE(SUM(CASE WHEN m.session = 'evening' THEN m.litres END), 0) AS evening
       FROM cows c LEFT JOIN milk m ON m.cow_id = c.id AND m.date = ? AND m.deleted = 0
       WHERE c.deleted = 0
       GROUP BY c.id ORDER BY c.name''', [today()]);
@@ -406,6 +410,83 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
+  Widget cowCard(Map<String, Object?> c) {
+    final id = '${c['id']}';
+    final name = '${c['name']}';
+    final tag = '${c['tag']}';
+    double v(String k) => (c[k] as num).toDouble();
+
+    Widget slot(String label, double litres) {
+      final done = litres > 0;
+      return Expanded(
+        child: Container(
+          margin: const EdgeInsets.symmetric(horizontal: 2),
+          padding: const EdgeInsets.symmetric(vertical: 6),
+          decoration: BoxDecoration(
+            color: done ? Colors.green.shade100 : Colors.grey.shade200,
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Column(children: [
+            Text(label, style: const TextStyle(fontSize: 12)),
+            Text(done ? '${litres.toStringAsFixed(1)} L' : '-',
+                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+          ]),
+        ),
+      );
+    }
+
+    return Card(
+      margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            const Icon(Icons.pets, size: 28),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text(name, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+                if (tag.isNotEmpty) Text('Tag $tag', style: const TextStyle(fontSize: 14)),
+              ]),
+            ),
+            IconButton(
+              tooltip: 'Edit or remove',
+              icon: const Icon(Icons.more_vert),
+              onPressed: () => cowMenu(id, name, tag),
+            ),
+          ]),
+          const SizedBox(height: 10),
+          Row(children: [
+            slot('Morning', v('morning')),
+            slot('Midday', v('midday')),
+            slot('Evening', v('evening')),
+          ]),
+          const SizedBox(height: 10),
+          Row(children: [
+            Expanded(
+              child: FilledButton.icon(
+                onPressed: () => addMilk(id, name),
+                icon: const Icon(Icons.add),
+                label: const Text('Add milk'),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: OutlinedButton.icon(
+                onPressed: () => Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                        builder: (_) => CowPage(cowId: id, cowName: name))),
+                icon: const Icon(Icons.history),
+                label: const Text('History'),
+              ),
+            ),
+          ]),
+        ]),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final total = cows.fold<double>(0, (s, c) => s + (c['today'] as num).toDouble());
@@ -449,18 +530,70 @@ class _HomePageState extends State<HomePage> {
           child: cows.isEmpty
               ? const Center(child: Text('No cows yet. Tap "Add cow".'))
               : ListView(children: [
-                  for (final c in cows)
-                    ListTile(
-                      leading: const Icon(Icons.pets),
-                      title: Text('${c['name']}'),
-                      subtitle: Text('Tag: ${c['tag']}'),
-                      trailing: Text('${(c['today'] as num).toStringAsFixed(1)} L'),
-                      onTap: () => addMilk('${c['id']}', '${c['name']}'),
-                      onLongPress: () => cowMenu('${c['id']}', '${c['name']}', '${c['tag']}'),
-                    ),
+                  for (final c in cows) cowCard(c),
                 ]),
         ),
       ]),
+    );
+  }
+}
+
+
+String niceDate(String d) {
+  if (d == today()) return 'Today';
+  final y = DateTime.now().subtract(const Duration(days: 1)).toIso8601String().substring(0, 10);
+  if (d == y) return 'Yesterday';
+  return d;
+}
+
+class CowPage extends StatefulWidget {
+  final String cowId;
+  final String cowName;
+  const CowPage({super.key, required this.cowId, required this.cowName});
+  @override
+  State<CowPage> createState() => _CowPageState();
+}
+
+class _CowPageState extends State<CowPage> {
+  List<Map<String, Object?>> records = [];
+
+  @override
+  void initState() {
+    super.initState();
+    load();
+  }
+
+  Future<void> load() async {
+    final rows = await db.query(
+      'milk',
+      where: 'cow_id = ? AND deleted = 0',
+      whereArgs: [widget.cowId],
+      orderBy: "date DESC, CASE session WHEN 'evening' THEN 3 WHEN 'midday' THEN 2 ELSE 1 END DESC",
+    );
+    if (!mounted) return;
+    setState(() => records = rows);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: Text(widget.cowName)),
+      body: records.isEmpty
+          ? const Center(child: Text('No milk recorded yet.'))
+          : ListView.builder(
+              itemCount: records.length,
+              itemBuilder: (context, i) {
+                final r = records[i];
+                final session = '${r['session']}';
+                return ListTile(
+                  leading: const Icon(Icons.water_drop),
+                  title: Text('${(r['litres'] as num).toStringAsFixed(1)} L',
+                      style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                  subtitle: Text(
+                      '${niceDate('${r['date']}')}  -  ${session[0].toUpperCase()}${session.substring(1)}'),
+                );
+              },
+            ),
     );
   }
 }
