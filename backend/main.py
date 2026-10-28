@@ -50,22 +50,25 @@ SCHEMA = [
 # Last-write-wins: a row changes only if the incoming updated_at is newer.
 # updated_at must be assigned LAST (MariaDB evaluates assignments in order).
 UPSERT_COW = """
-INSERT INTO cows (id, name, tag, updated_at)
-VALUES (:id, :name, :tag, :updated_at)
+INSERT INTO cows (id, name, tag, deleted, removed_reason, updated_at)
+VALUES (:id, :name, :tag, :deleted, :removed_reason, :updated_at)
 ON DUPLICATE KEY UPDATE
     name = IF(VALUES(updated_at) > updated_at, VALUES(name), name),
     tag = IF(VALUES(updated_at) > updated_at, VALUES(tag), tag),
+    deleted = IF(VALUES(updated_at) > updated_at, VALUES(deleted), deleted),
+    removed_reason = IF(VALUES(updated_at) > updated_at, VALUES(removed_reason), removed_reason),
     updated_at = GREATEST(updated_at, VALUES(updated_at))
 """
 
 UPSERT_MILK = """
-INSERT INTO milk (id, cow_id, litres, session, date, updated_at)
-VALUES (:id, :cow_id, :litres, :session, :date, :updated_at)
+INSERT INTO milk (id, cow_id, litres, session, date, deleted, updated_at)
+VALUES (:id, :cow_id, :litres, :session, :date, :deleted, :updated_at)
 ON DUPLICATE KEY UPDATE
     cow_id = IF(VALUES(updated_at) > updated_at, VALUES(cow_id), cow_id),
     litres = IF(VALUES(updated_at) > updated_at, VALUES(litres), litres),
     session = IF(VALUES(updated_at) > updated_at, VALUES(session), session),
     date = IF(VALUES(updated_at) > updated_at, VALUES(date), date),
+    deleted = IF(VALUES(updated_at) > updated_at, VALUES(deleted), deleted),
     updated_at = GREATEST(updated_at, VALUES(updated_at))
 """
 
@@ -106,6 +109,7 @@ class CowIn(BaseModel):
     tag: str = ""
     updated_at: int
     deleted: int = 0
+    removed_reason: str = ""
 
 
 class MilkIn(BaseModel):
