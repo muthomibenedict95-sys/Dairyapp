@@ -1,6 +1,7 @@
 """Dairy App backend: FastAPI + async SQLAlchemy + MariaDB."""
 import os
 import time
+from typing import Literal
 import re
 import asyncio
 import hashlib
@@ -68,6 +69,23 @@ SCHEMA = [
         INDEX idx_milk_server_updated (server_updated_at)
     ) CHARACTER SET utf8mb4
     """,
+    """
+    CREATE TABLE IF NOT EXISTS milk_use (
+        id CHAR(36) PRIMARY KEY,
+        date DATE NOT NULL,
+        kind VARCHAR(20) NOT NULL,
+        litres DOUBLE NOT NULL,
+        price_per_litre DOUBLE NULL,
+        deleted TINYINT NOT NULL DEFAULT 0,
+        farmer_id CHAR(36) NULL,
+        server_updated_at BIGINT NOT NULL DEFAULT 0,
+        updated_at BIGINT NOT NULL,
+        received_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_use_farmer (farmer_id),
+        INDEX idx_use_date (date),
+        INDEX idx_use_server_updated (server_updated_at)
+    ) CHARACTER SET utf8mb4
+    """,
 ]
 
 # Last-write-wins: a row changes only if the incoming updated_at is newer
@@ -100,6 +118,21 @@ ON DUPLICATE KEY UPDATE
     updated_at = IF(farmer_id <=> VALUES(farmer_id), GREATEST(updated_at, VALUES(updated_at)), updated_at)
 """
 
+
+
+UPSERT_MILK_USE = """
+INSERT INTO milk_use (id, date, kind, litres, price_per_litre, deleted, farmer_id, server_updated_at, updated_at)
+VALUES (:id, :date, :kind, :litres, :price_per_litre, :deleted, :farmer_id, :now, :updated_at)
+ON DUPLICATE KEY UPDATE
+    farmer_id = IF(farmer_id IS NULL, VALUES(farmer_id), farmer_id),
+    date = IF(VALUES(updated_at) > updated_at AND farmer_id <=> VALUES(farmer_id), VALUES(date), date),
+    kind = IF(VALUES(updated_at) > updated_at AND farmer_id <=> VALUES(farmer_id), VALUES(kind), kind),
+    litres = IF(VALUES(updated_at) > updated_at AND farmer_id <=> VALUES(farmer_id), VALUES(litres), litres),
+    price_per_litre = IF(VALUES(updated_at) > updated_at AND farmer_id <=> VALUES(farmer_id), VALUES(price_per_litre), price_per_litre),
+    deleted = IF(VALUES(updated_at) > updated_at AND farmer_id <=> VALUES(farmer_id), VALUES(deleted), deleted),
+    server_updated_at = IF(VALUES(updated_at) > updated_at AND farmer_id <=> VALUES(farmer_id), VALUES(server_updated_at), server_updated_at),
+    updated_at = IF(farmer_id <=> VALUES(farmer_id), GREATEST(updated_at, VALUES(updated_at)), updated_at)
+"""
 
 
 def normalize_phone(raw: str) -> str:
@@ -150,9 +183,20 @@ class MilkIn(BaseModel):
     deleted: int = 0
 
 
+class MilkUseIn(BaseModel):
+    id: str
+    date: str  # YYYY-MM-DD
+    kind: Literal["household", "sold", "spoiled"]
+    litres: float
+    price_per_litre: float | None = None
+    updated_at: int
+    deleted: int = 0
+
+
 class SyncRequest(BaseModel):
     cows: list[CowIn] = []
     milk: list[MilkIn] = []
+    milk_use: list[MilkUseIn] = []
 
 
 class RegisterIn(BaseModel):
@@ -283,8 +327,14 @@ async def sync(payload: SyncRequest, farmer_id=Depends(current_farmer)):
                 text(UPSERT_MILK),
                 [{**m.model_dump(), "farmer_id": farmer_id, "now": now} for m in payload.milk],
             )
+        if payload.milk_use:
+            await conn.execute(
+                text(UPSERT_MILK_USE),
+                [{**u.model_dump(), "farmer_id": farmer_id, "now": now} for u in payload.milk_use],
+            )
     return {
         "success": True,
+        "milk_use_received": len(payload.milk_use),
         "cows_received": len(payload.cows),
         "milk_received": len(payload.milk),
         "server_time": now,
@@ -309,6 +359,18 @@ async def list_milk(since: int = 0, offset: int = 0, farmer_id=Depends(current_f
         rows = await conn.execute(
             text("SELECT id, cow_id, litres, session, date, deleted, updated_at, server_updated_at "
                  "FROM milk WHERE farmer_id <=> :f AND server_updated_at >= :since "
+                 "ORDER BY server_updated_at, id LIMIT 1000 OFFSET :off"),
+            {"f": farmer_id, "since": since, "off": offset},
+        )
+        return [{**dict(r._mapping), "date": str(r._mapping["date"])} for r in rows]
+
+
+@app.get("/api/milk_use")
+async def list_milk_use(since: int = 0, offset: int = 0, farmer_id=Depends(current_farmer)):
+    async with engine.connect() as conn:
+        rows = await conn.execute(
+            text("SELECT id, date, kind, litres, price_per_litre, deleted, updated_at, server_updated_at "
+                 "FROM milk_use WHERE farmer_id <=> :f AND server_updated_at >= :since "
                  "ORDER BY server_updated_at, id LIMIT 1000 OFFSET :off"),
             {"f": farmer_id, "since": since, "off": offset},
         )
