@@ -7,6 +7,9 @@ import 'package:http/http.dart' as http;
 import 'package:path/path.dart' as p;
 import 'package:sqflite/sqflite.dart';
 import 'package:uuid/uuid.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:timezone/data/latest.dart' as tzdata;
+import 'package:timezone/timezone.dart' as tz;
 
 late Database db;
 const uuid = Uuid();
@@ -168,6 +171,7 @@ class _HomePageState extends State<HomePage> {
   void initState() {
     super.initState();
     load();
+    initReminders();
     // Automatic sync whenever the phone gets a network connection.
     _sub = Connectivity().onConnectivityChanged.listen((results) {
       if (!results.contains(ConnectivityResult.none)) syncNow(silent: true);
@@ -205,6 +209,7 @@ class _HomePageState extends State<HomePage> {
       pending = pc;
       useToday = useMap;
     });
+    scheduleReminders();
   }
 
   Future<void> syncNow({bool silent = false}) async {
@@ -411,6 +416,38 @@ class _HomePageState extends State<HomePage> {
         whereArgs: [id]);
     await load();
     syncNow(silent: true);
+  }
+
+  Future<void> remindersInfo() async {
+    final android = notifier
+        .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
+    final allowed = await android?.areNotificationsEnabled() ?? true;
+    final scheduled = (await notifier.pendingNotificationRequests()).length;
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Milk reminders'),
+        content: Text('Reminders at 6:00, 12:00 and 18:00.\n'
+            'A reminder is skipped when every cow already has that session recorded.\n\n'
+            '${allowed ? 'Notifications are allowed.' : 'Notifications are blocked. Allow them in the phone settings.'}\n$scheduled reminders scheduled.'),
+        actions: [
+          TextButton(
+            onPressed: () {
+              notifier.show(
+                id: 99,
+                title: 'Dairy App',
+                body: 'Test reminder',
+                notificationDetails: reminderDetails,
+              );
+              Navigator.pop(context);
+            },
+            child: const Text('Send test'),
+          ),
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Close')),
+        ],
+      ),
+    );
   }
 
   Future<void> editServer() async {
@@ -638,6 +675,11 @@ class _HomePageState extends State<HomePage> {
       appBar: AppBar(
         title: const Text('My Cows'),
         actions: [
+          IconButton(
+            tooltip: 'Reminders',
+            icon: const Icon(Icons.notifications),
+            onPressed: remindersInfo,
+          ),
           IconButton(
             tooltip: 'Server address',
             icon: const Icon(Icons.settings),
@@ -1047,4 +1089,81 @@ class _UseReportPageState extends State<UseReportPage> {
       ]),
     );
   }
+}
+
+// ---------- reminders ----------
+class ReminderSlot {
+  final int id;
+  final String session;
+  final int hour;
+  const ReminderSlot(this.id, this.session, this.hour);
+}
+
+const reminderSlots = [
+  ReminderSlot(1, 'morning', 6),
+  ReminderSlot(2, 'midday', 12),
+  ReminderSlot(3, 'evening', 18),
+];
+
+final FlutterLocalNotificationsPlugin notifier = FlutterLocalNotificationsPlugin();
+
+const reminderDetails = NotificationDetails(
+  android: AndroidNotificationDetails(
+    'milk_reminders',
+    'Milk reminders',
+    channelDescription: 'Reminders to record milk',
+    importance: Importance.high,
+    priority: Priority.high,
+  ),
+);
+
+bool _remindersReady = false;
+
+Future<void> initReminders() async {
+  try {
+    tzdata.initializeTimeZones();
+    tz.setLocalLocation(tz.getLocation('Africa/Nairobi'));
+    await notifier.initialize(
+      settings: const InitializationSettings(
+        android: AndroidInitializationSettings('@mipmap/ic_launcher'),
+      ),
+    );
+    await notifier
+        .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>()
+        ?.requestNotificationsPermission();
+    _remindersReady = true;
+    await scheduleReminders();
+  } catch (_) {}
+}
+
+/// Schedules the three daily reminders. A session that already has a record
+/// for every cow today is moved to tomorrow, so the farmer is not nagged.
+Future<void> scheduleReminders() async {
+  if (!_remindersReady) return;
+  try {
+    final now = tz.TZDateTime.now(tz.local);
+    final cowCount = Sqflite.firstIntValue(
+            await db.rawQuery('SELECT COUNT(*) FROM cows WHERE deleted = 0')) ??
+        0;
+    for (final slot in reminderSlots) {
+      final recorded = Sqflite.firstIntValue(await db.rawQuery(
+              'SELECT COUNT(DISTINCT cow_id) FROM milk WHERE date = ? AND session = ? AND deleted = 0',
+              [today(), slot.session])) ??
+          0;
+      final done = cowCount == 0 || recorded >= cowCount;
+      var when = tz.TZDateTime(tz.local, now.year, now.month, now.day, slot.hour);
+      if (done || !when.isAfter(now)) {
+        when = when.add(const Duration(days: 1));
+      }
+      await notifier.zonedSchedule(
+        id: slot.id,
+        scheduledDate: when,
+        notificationDetails: reminderDetails,
+        androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
+        title: 'Dairy App',
+        body: 'Time to record the ${slot.session} milk',
+        matchDateTimeComponents: DateTimeComponents.time,
+      );
+    }
+  } catch (_) {}
 }
