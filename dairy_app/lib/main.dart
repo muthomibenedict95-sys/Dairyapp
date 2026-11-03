@@ -12,7 +12,6 @@ late Database db;
 const uuid = Uuid();
 
 // Must match API_KEY on the server.
-const apiKey = 'change-me-secret-key';
 const defaultServerUrl = 'http://192.168.1.100:8000'; // change in the app (gear icon)
 
 int nowMs() => DateTime.now().millisecondsSinceEpoch;
@@ -60,6 +59,7 @@ Future<void> main() async {
       }
     },
   );
+  await loadAuthState();
   runApp(const DairyApp());
 }
 
@@ -87,11 +87,16 @@ class SyncService {
       final milk = await db.query('milk', where: 'synced = 0');
       if (cows.isEmpty && milk.isEmpty) return 'Everything is already synced';
 
+      final token = await getToken();
+      if (token == null) return 'Please log in';
       final url = Uri.parse('${await getServerUrl()}/api/sync');
       final res = await http
           .post(
             url,
-            headers: {'Content-Type': 'application/json', 'X-API-Key': apiKey},
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': 'Bearer $token',
+            },
             body: jsonEncode({'cows': cows, 'milk': milk}),
           )
           .timeout(const Duration(seconds: 10));
@@ -109,6 +114,10 @@ class SyncService {
         }
         await batch.commit(noResult: true);
         return 'Synced ${cows.length} cows and ${milk.length} milk records';
+      }
+      if (res.statusCode == 401) {
+        await setToken(null);
+        return 'Please log in again';
       }
       return 'Server error (${res.statusCode})';
     } on TimeoutException {
@@ -128,7 +137,7 @@ class DairyApp extends StatelessWidget {
   Widget build(BuildContext context) => MaterialApp(
         title: 'Dairy App',
         theme: ThemeData(colorSchemeSeed: Colors.green, useMaterial3: true),
-        home: const HomePage(),
+        home: const AuthGate(),
       );
 }
 
@@ -596,4 +605,176 @@ class _CowPageState extends State<CowPage> {
             ),
     );
   }
+}
+
+// ---------- login ----------
+final ValueNotifier<bool?> authState = ValueNotifier<bool?>(null);
+
+Future<String?> getToken() async {
+  final r = await db.query('settings', where: 'key = ?', whereArgs: ['auth_token']);
+  return r.isEmpty ? null : r.first['value'] as String;
+}
+
+Future<void> setToken(String? token) async {
+  if (token == null) {
+    await db.delete('settings', where: 'key = ?', whereArgs: ['auth_token']);
+  } else {
+    await db.insert('settings', {'key': 'auth_token', 'value': token},
+        conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+  authState.value = token != null;
+}
+
+Future<void> loadAuthState() async {
+  authState.value = (await getToken()) != null;
+}
+
+class AuthGate extends StatelessWidget {
+  const AuthGate({super.key});
+  @override
+  Widget build(BuildContext context) => ValueListenableBuilder<bool?>(
+        valueListenable: authState,
+        builder: (context, v, _) {
+          if (v == null) {
+            return const Scaffold(body: Center(child: CircularProgressIndicator()));
+          }
+          return v ? const HomePage() : const LoginPage();
+        },
+      );
+}
+
+class LoginPage extends StatefulWidget {
+  const LoginPage({super.key});
+  @override
+  State<LoginPage> createState() => _LoginPageState();
+}
+
+class _LoginPageState extends State<LoginPage> {
+  final phone = TextEditingController();
+  final pin = TextEditingController();
+  final url = TextEditingController();
+  bool registering = false;
+  bool busy = false;
+  String? error;
+
+  @override
+  void initState() {
+    super.initState();
+    getServerUrl().then((u) => url.text = u);
+  }
+
+  @override
+  void dispose() {
+    phone.dispose();
+    pin.dispose();
+    url.dispose();
+    super.dispose();
+  }
+
+  Future<void> submit() async {
+    final p = phone.text.trim();
+    final c = pin.text.trim();
+    if (p.isEmpty) {
+      setState(() => error = 'Enter your phone number');
+      return;
+    }
+    if (!RegExp(r'^\d{4}$').hasMatch(c)) {
+      setState(() => error = 'PIN must be 4 digits');
+      return;
+    }
+    setState(() {
+      busy = true;
+      error = null;
+    });
+    try {
+      final base = url.text.trim().replaceAll(RegExp(r'/+$'), '');
+      await setServerUrl(base);
+      final res = await http
+          .post(
+            Uri.parse('$base/api/${registering ? 'register' : 'login'}'),
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode({'phone': p, 'pin': c}),
+          )
+          .timeout(const Duration(seconds: 10));
+      if (res.statusCode == 200) {
+        final token = jsonDecode(res.body)['token'] as String;
+        // Claim everything already on this phone for this farmer.
+        await db.update('cows', {'synced': 0});
+        await db.update('milk', {'synced': 0});
+        await setToken(token);
+        return;
+      }
+      String detail = 'Something went wrong (${res.statusCode})';
+      try {
+        final d = jsonDecode(res.body)['detail'];
+        if (d is String) detail = d;
+      } catch (_) {}
+      setState(() => error = detail);
+    } on TimeoutException {
+      setState(() => error = 'Server not reachable. Check the address and your network.');
+    } catch (_) {
+      setState(() => error = 'Could not connect. Check the address and your network.');
+    } finally {
+      if (mounted) setState(() => busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+        appBar: AppBar(title: const Text('Dairy App')),
+        body: ListView(
+          padding: const EdgeInsets.all(20),
+          children: [
+            Text(registering ? 'Create your account' : 'Log in',
+                style: Theme.of(context).textTheme.headlineSmall),
+            const SizedBox(height: 16),
+            TextField(
+              controller: phone,
+              keyboardType: TextInputType.phone,
+              decoration: const InputDecoration(
+                  labelText: 'Phone number', border: OutlineInputBorder()),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: pin,
+              keyboardType: TextInputType.number,
+              obscureText: true,
+              maxLength: 4,
+              decoration: const InputDecoration(
+                  labelText: '4-digit PIN', border: OutlineInputBorder()),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: url,
+              keyboardType: TextInputType.url,
+              decoration: const InputDecoration(
+                  labelText: 'Server address', border: OutlineInputBorder()),
+            ),
+            if (error != null) ...[
+              const SizedBox(height: 12),
+              Text(error!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
+            ],
+            const SizedBox(height: 16),
+            FilledButton(
+              onPressed: busy ? null : submit,
+              child: Text(busy ? 'Please wait...' : (registering ? 'Register' : 'Log in')),
+            ),
+            TextButton(
+              onPressed: busy
+                  ? null
+                  : () => setState(() {
+                        registering = !registering;
+                        error = null;
+                      }),
+              child: Text(registering ? 'I already have an account' : 'New farmer? Register'),
+            ),
+            if (!registering)
+              const Padding(
+                padding: EdgeInsets.only(top: 8),
+                child: Text('Forgot your PIN? Contact your administrator.',
+                    textAlign: TextAlign.center),
+              ),
+          ],
+        ),
+      );
 }
