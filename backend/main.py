@@ -77,6 +77,7 @@ UPSERT_COW = """
 INSERT INTO cows (id, name, tag, deleted, removed_reason, farmer_id, server_updated_at, updated_at)
 VALUES (:id, :name, :tag, :deleted, :removed_reason, :farmer_id, :now, :updated_at)
 ON DUPLICATE KEY UPDATE
+    farmer_id = IF(farmer_id IS NULL, VALUES(farmer_id), farmer_id),
     name = IF(VALUES(updated_at) > updated_at AND farmer_id <=> VALUES(farmer_id), VALUES(name), name),
     tag = IF(VALUES(updated_at) > updated_at AND farmer_id <=> VALUES(farmer_id), VALUES(tag), tag),
     deleted = IF(VALUES(updated_at) > updated_at AND farmer_id <=> VALUES(farmer_id), VALUES(deleted), deleted),
@@ -89,6 +90,7 @@ UPSERT_MILK = """
 INSERT INTO milk (id, cow_id, litres, session, date, deleted, farmer_id, server_updated_at, updated_at)
 VALUES (:id, :cow_id, :litres, :session, :date, :deleted, :farmer_id, :now, :updated_at)
 ON DUPLICATE KEY UPDATE
+    farmer_id = IF(farmer_id IS NULL, VALUES(farmer_id), farmer_id),
     cow_id = IF(VALUES(updated_at) > updated_at AND farmer_id <=> VALUES(farmer_id), VALUES(cow_id), cow_id),
     litres = IF(VALUES(updated_at) > updated_at AND farmer_id <=> VALUES(farmer_id), VALUES(litres), litres),
     session = IF(VALUES(updated_at) > updated_at AND farmer_id <=> VALUES(farmer_id), VALUES(session), session),
