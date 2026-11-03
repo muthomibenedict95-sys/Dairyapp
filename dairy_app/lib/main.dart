@@ -21,7 +21,7 @@ Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   db = await openDatabase(
     p.join(await getDatabasesPath(), 'dairy_v2.db'),
-    version: 3,
+    version: 4,
     onCreate: (d, v) async {
       // id is a UUID made on the phone; synced: 0 = pending, 1 = on server.
       await d.execute('''
@@ -48,11 +48,17 @@ Future<void> main() async {
       await d.execute('CREATE INDEX idx_milk_synced ON milk(synced)');
       await d.execute('CREATE INDEX idx_cows_synced ON cows(synced)');
       await d.execute('CREATE TABLE settings(key TEXT PRIMARY KEY, value TEXT)');
+      await d.execute('CREATE TABLE milk_use(id TEXT PRIMARY KEY, date TEXT NOT NULL, kind TEXT NOT NULL, litres REAL NOT NULL, price_per_litre REAL, updated_at INTEGER NOT NULL, synced INTEGER NOT NULL DEFAULT 0, deleted INTEGER NOT NULL DEFAULT 0)');
+      await d.execute('CREATE INDEX idx_use_synced ON milk_use(synced)');
     },
     onUpgrade: (d, oldV, newV) async {
       if (oldV < 2) {
         await d.execute('ALTER TABLE cows ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0');
         await d.execute('ALTER TABLE milk ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0');
+      }
+      if (oldV < 4) {
+        await d.execute('CREATE TABLE milk_use(id TEXT PRIMARY KEY, date TEXT NOT NULL, kind TEXT NOT NULL, litres REAL NOT NULL, price_per_litre REAL, updated_at INTEGER NOT NULL, synced INTEGER NOT NULL DEFAULT 0, deleted INTEGER NOT NULL DEFAULT 0)');
+        await d.execute('CREATE INDEX idx_use_synced ON milk_use(synced)');
       }
       if (oldV < 3) {
         await d.execute("ALTER TABLE cows ADD COLUMN removed_reason TEXT NOT NULL DEFAULT ''");
@@ -85,7 +91,8 @@ class SyncService {
     try {
       final cows = await db.query('cows', where: 'synced = 0');
       final milk = await db.query('milk', where: 'synced = 0');
-      if (cows.isEmpty && milk.isEmpty) return 'Everything is already synced';
+      final uses = await db.query('milk_use', where: 'synced = 0');
+      if (cows.isEmpty && milk.isEmpty && uses.isEmpty) return 'Everything is already synced';
 
       final token = await getToken();
       if (token == null) return 'Please log in';
@@ -97,7 +104,7 @@ class SyncService {
               'Content-Type': 'application/json',
               'Authorization': 'Bearer $token',
             },
-            body: jsonEncode({'cows': cows, 'milk': milk}),
+            body: jsonEncode({'cows': cows, 'milk': milk, 'milk_use': uses}),
           )
           .timeout(const Duration(seconds: 10));
 
@@ -111,6 +118,10 @@ class SyncService {
         for (final m in milk) {
           batch.update('milk', {'synced': 1},
               where: 'id = ? AND updated_at = ?', whereArgs: [m['id'], m['updated_at']]);
+        }
+        for (final u in uses) {
+          batch.update('milk_use', {'synced': 1},
+              where: 'id = ? AND updated_at = ?', whereArgs: [u['id'], u['updated_at']]);
         }
         await batch.commit(noResult: true);
         return 'Synced ${cows.length} cows and ${milk.length} milk records';
@@ -701,6 +712,7 @@ class _LoginPageState extends State<LoginPage> {
         // Claim everything already on this phone for this farmer.
         await db.update('cows', {'synced': 0});
         await db.update('milk', {'synced': 0});
+        await db.update('milk_use', {'synced': 0});
         await setToken(token);
         return;
       }
