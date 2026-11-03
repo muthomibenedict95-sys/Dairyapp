@@ -161,6 +161,7 @@ class HomePage extends StatefulWidget {
 class _HomePageState extends State<HomePage> {
   List<Map<String, Object?>> cows = [];
   int pending = 0;
+  Map<String, double> useToday = {};
   StreamSubscription<List<ConnectivityResult>>? _sub;
 
   @override
@@ -190,6 +191,11 @@ class _HomePageState extends State<HomePage> {
       FROM cows c LEFT JOIN milk m ON m.cow_id = c.id AND m.date = ? AND m.deleted = 0
       WHERE c.deleted = 0
       GROUP BY c.id ORDER BY c.name''', [today()]);
+    final useRows = await db.query('milk_use',
+        columns: ['kind', 'litres'], where: 'date = ? AND deleted = 0', whereArgs: [today()]);
+    final useMap = {
+      for (final r in useRows) '${r['kind']}': (r['litres'] as num).toDouble()
+    };
     final pc = Sqflite.firstIntValue(await db.rawQuery(
             'SELECT (SELECT COUNT(*) FROM cows WHERE synced = 0) + (SELECT COUNT(*) FROM milk WHERE synced = 0)')) ??
         0;
@@ -197,6 +203,7 @@ class _HomePageState extends State<HomePage> {
     setState(() {
       cows = rows;
       pending = pc;
+      useToday = useMap;
     });
   }
 
@@ -430,6 +437,123 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
+  Widget useField(TextEditingController c, String label) => TextField(
+        controller: c,
+        keyboardType: const TextInputType.numberWithOptions(decimal: true),
+        decoration: InputDecoration(labelText: label, border: const OutlineInputBorder()),
+      );
+
+  Widget useCard(double produced) {
+    final h = useToday['household'] ?? 0;
+    final s = useToday['sold'] ?? 0;
+    final sp = useToday['spoiled'] ?? 0;
+    final left = produced - h - s - sp;
+    String l(double v) => v.toStringAsFixed(1);
+    final status = left.abs() < 0.05
+        ? 'All milk accounted for'
+        : left > 0
+            ? '${l(left)} L not accounted for'
+            : '${l(-left)} L more than recorded';
+    return Card(
+      margin: const EdgeInsets.fromLTRB(12, 8, 12, 2),
+      child: InkWell(
+        onTap: editUse,
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Row(children: [
+              const Icon(Icons.local_drink),
+              const SizedBox(width: 8),
+              const Expanded(
+                child: Text('Where did the milk go?',
+                    style: TextStyle(fontWeight: FontWeight.bold)),
+              ),
+              TextButton(
+                onPressed: () => Navigator.push(context,
+                    MaterialPageRoute(builder: (_) => const UseReportPage())),
+                child: const Text('Report'),
+              ),
+            ]),
+            Text('Household ${l(h)} L  •  Sold ${l(s)} L  •  Spoiled ${l(sp)} L'),
+            const SizedBox(height: 2),
+            Text(status,
+                style: TextStyle(color: left > 0.05 ? Colors.orange.shade800 : null)),
+          ]),
+        ),
+      ),
+    );
+  }
+
+  Future<void> editUse() async {
+    final produced = cows.fold<double>(0, (a, c) => a + (c['today'] as num).toDouble());
+    final rows = await db.query('milk_use',
+        where: 'date = ? AND deleted = 0', whereArgs: [today()]);
+    Object? field(String kind, String col) {
+      for (final r in rows) {
+        if (r['kind'] == kind) return r[col];
+      }
+      return null;
+    }
+
+    String show(Object? v) {
+      final n = v is num ? v.toDouble() : 0.0;
+      return n == 0 ? '' : n.toString();
+    }
+
+    final household = TextEditingController(text: show(field('household', 'litres')));
+    final sold = TextEditingController(text: show(field('sold', 'litres')));
+    final spoiled = TextEditingController(text: show(field('spoiled', 'litres')));
+    final price = TextEditingController(text: show(field('sold', 'price_per_litre')));
+    if (!mounted) return;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Where did the milk go?'),
+        content: SingleChildScrollView(
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            Text('Milk recorded today: ${produced.toStringAsFixed(1)} L'),
+            const SizedBox(height: 12),
+            useField(household, 'Used in the household (L)'),
+            const SizedBox(height: 8),
+            useField(sold, 'Sold (L)'),
+            const SizedBox(height: 8),
+            useField(price, 'Price per litre sold (optional)'),
+            const SizedBox(height: 8),
+            useField(spoiled, 'Spoiled (L)'),
+          ]),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Save')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    double? parse(TextEditingController c) {
+      final t = c.text.trim().replaceAll(',', '.');
+      if (t.isEmpty) return 0.0;
+      final v = double.tryParse(t);
+      return (v == null || v < 0) ? null : v;
+    }
+
+    final hVal = parse(household);
+    final sVal = parse(sold);
+    final spVal = parse(spoiled);
+    final prVal = parse(price);
+    if (hVal == null || sVal == null || spVal == null || prVal == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Please enter valid numbers only')));
+      }
+      return;
+    }
+    await saveMilkUse('household', hVal, null);
+    await saveMilkUse('sold', sVal, prVal > 0 ? prVal : null);
+    await saveMilkUse('spoiled', spVal, null);
+    await load();
+    syncNow(silent: true);
+  }
+
   Widget cowCard(Map<String, Object?> c) {
     final id = '${c['id']}';
     final name = '${c['name']}';
@@ -546,6 +670,7 @@ class _HomePageState extends State<HomePage> {
             style: Theme.of(context).textTheme.titleMedium,
           ),
         ),
+        useCard(total),
         Expanded(
           child: cows.isEmpty
               ? const Center(child: Text('No cows yet. Tap "Add cow".'))
@@ -789,4 +914,137 @@ class _LoginPageState extends State<LoginPage> {
           ],
         ),
       );
+}
+
+// ---------- milk use (household / sold / spoiled) ----------
+/// One record per kind per day: update it if it exists, otherwise create it.
+Future<void> saveMilkUse(String kind, double litres, double? price) async {
+  final now = DateTime.now().millisecondsSinceEpoch;
+  final ex = await db.query('milk_use',
+      where: 'date = ? AND kind = ?', whereArgs: [today(), kind]);
+  if (ex.isEmpty) {
+    if (litres == 0) return;
+    await db.insert('milk_use', {
+      'id': uuid.v4(),
+      'date': today(),
+      'kind': kind,
+      'litres': litres,
+      'price_per_litre': price,
+      'updated_at': now,
+      'synced': 0,
+      'deleted': 0,
+    });
+  } else {
+    await db.update(
+        'milk_use',
+        {
+          'litres': litres,
+          'price_per_litre': price,
+          'updated_at': now,
+          'synced': 0,
+          'deleted': 0,
+        },
+        where: 'id = ?',
+        whereArgs: [ex.first['id']]);
+  }
+}
+
+class UseReportPage extends StatefulWidget {
+  const UseReportPage({super.key});
+  @override
+  State<UseReportPage> createState() => _UseReportPageState();
+}
+
+class _UseReportPageState extends State<UseReportPage> {
+  static const days = 14;
+  List<Map<String, Object?>> rows = [];
+
+  @override
+  void initState() {
+    super.initState();
+    load();
+  }
+
+  Future<void> load() async {
+    final dates = [
+      for (var i = 0; i < days; i++)
+        DateTime.now().subtract(Duration(days: i)).toIso8601String().substring(0, 10)
+    ];
+    final from = dates.last;
+    final produced = await db.rawQuery(
+        'SELECT date, SUM(litres) AS l FROM milk WHERE deleted = 0 AND date >= ? GROUP BY date',
+        [from]);
+    final uses = await db.rawQuery(
+        'SELECT date, kind, SUM(litres) AS l, SUM(litres * COALESCE(price_per_litre, 0)) AS money '
+        'FROM milk_use WHERE deleted = 0 AND date >= ? GROUP BY date, kind',
+        [from]);
+    final out = <Map<String, Object?>>[];
+    for (final d in dates) {
+      double prod = 0, h = 0, s = 0, sp = 0, money = 0;
+      for (final r in produced) {
+        if (r['date'] == d) prod += (r['l'] as num).toDouble();
+      }
+      for (final r in uses) {
+        if (r['date'] != d) continue;
+        final l = (r['l'] as num).toDouble();
+        final k = '${r['kind']}';
+        if (k == 'household') {
+          h += l;
+        } else if (k == 'sold') {
+          s += l;
+          money += (r['money'] as num).toDouble();
+        } else if (k == 'spoiled') {
+          sp += l;
+        }
+      }
+      out.add({'date': d, 'prod': prod, 'h': h, 's': s, 'sp': sp, 'money': money});
+    }
+    if (!mounted) return;
+    setState(() => rows = out);
+  }
+
+  Widget dayTile(Map<String, Object?> r) {
+    double v(String k) => (r[k] as num).toDouble();
+    String l(double x) => x.toStringAsFixed(1);
+    final left = v('prod') - v('h') - v('s') - v('sp');
+    return Card(
+      child: ListTile(
+        title: Text('${niceDate('${r['date']}')}  •  ${l(v('prod'))} L produced'),
+        subtitle: Text([
+          'Household ${l(v('h'))} L  •  Sold ${l(v('s'))} L  •  Spoiled ${l(v('sp'))} L',
+          if (v('money') > 0) 'Income: KSh ${v('money').toStringAsFixed(0)}',
+          if (v('prod') > 0 && left.abs() >= 0.05)
+            (left > 0 ? '${l(left)} L not accounted for' : '${l(-left)} L more than recorded'),
+        ].join('\n')),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    double sum(String k) => rows.fold<double>(0, (a, r) => a + (r[k] as num).toDouble());
+    String l(double x) => x.toStringAsFixed(1);
+    return Scaffold(
+      appBar: AppBar(title: const Text('Milk report')),
+      body: ListView(padding: const EdgeInsets.all(12), children: [
+        Card(
+          color: Theme.of(context).colorScheme.primaryContainer,
+          child: Padding(
+            padding: const EdgeInsets.all(14),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text('Last $days days', style: Theme.of(context).textTheme.titleMedium),
+              const SizedBox(height: 6),
+              Text('Produced ${l(sum('prod'))} L'),
+              Text('Household ${l(sum('h'))} L'),
+              Text('Sold ${l(sum('s'))} L'),
+              Text('Spoiled ${l(sum('sp'))} L'),
+              if (sum('money') > 0)
+                Text('Income from sales: KSh ${sum('money').toStringAsFixed(0)}'),
+            ]),
+          ),
+        ),
+        for (final r in rows) dayTile(r),
+      ]),
+    );
+  }
 }
