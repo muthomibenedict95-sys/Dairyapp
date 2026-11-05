@@ -375,3 +375,32 @@ async def list_milk_use(since: int = 0, offset: int = 0, farmer_id=Depends(curre
             {"f": farmer_id, "since": since, "off": offset},
         )
         return [{**dict(r._mapping), "date": str(r._mapping["date"])} for r in rows]
+
+
+class ChangePinIn(BaseModel):
+    old_pin: str
+    new_pin: str
+
+
+@app.post("/api/change_pin")
+async def change_pin(body: ChangePinIn, farmer_id=Depends(current_farmer)):
+    if farmer_id is None:
+        raise HTTPException(status_code=401, detail="Please log in")
+    if not re.fullmatch(r"\d{4}", body.new_pin):
+        raise HTTPException(status_code=400, detail="New PIN must be 4 digits")
+    ok = False
+    async with engine.begin() as conn:
+        row = (await conn.execute(
+            text("SELECT pin_hash FROM farmers WHERE id = :id"), {"id": farmer_id},
+        )).first()
+        if row is not None:
+            ok = await asyncio.to_thread(bcrypt.checkpw, body.old_pin.encode(), row[0].encode())
+        if ok:
+            new_hash = await asyncio.to_thread(bcrypt.hashpw, body.new_pin.encode(), bcrypt.gensalt())
+            await conn.execute(
+                text("UPDATE farmers SET pin_hash = :h WHERE id = :id"),
+                {"h": new_hash.decode(), "id": farmer_id},
+            )
+    if not ok:
+        raise HTTPException(status_code=403, detail="Current PIN is wrong")
+    return {"success": True}
