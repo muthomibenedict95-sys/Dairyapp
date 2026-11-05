@@ -33,6 +33,8 @@ SCHEMA = [
         token CHAR(64) NOT NULL UNIQUE,
         failed_attempts INT NOT NULL DEFAULT 0,
         locked_until BIGINT NOT NULL DEFAULT 0,
+        must_change TINYINT NOT NULL DEFAULT 0,
+        temp_expires BIGINT NOT NULL DEFAULT 0,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     ) CHARACTER SET utf8mb4
     """,
@@ -277,22 +279,24 @@ async def login(body: LoginIn):
     # Decide inside the transaction, raise AFTER it, so the counter is saved.
     async with engine.begin() as conn:
         row = (await conn.execute(
-            text("SELECT id, pin_hash, failed_attempts, locked_until FROM farmers WHERE phone = :p"),
+            text("SELECT id, pin_hash, failed_attempts, locked_until, must_change, temp_expires FROM farmers WHERE phone = :p"),
             {"p": phone},
         )).first()
         if row is not None:
-            farmer_id, pin_hash, failed, locked_until = row
+            farmer_id, pin_hash, failed, locked_until, must_change, temp_expires = row
             if locked_until > now:
                 result = ("locked", (locked_until - now + 59) // 60)
             else:
                 ok = await asyncio.to_thread(bcrypt.checkpw, body.pin.encode(), pin_hash.encode())
-                if ok:
+                if ok and must_change and temp_expires < now:
+                    result = ("expired", None)
+                elif ok:
                     token = secrets.token_hex(32)
                     await conn.execute(
                         text("UPDATE farmers SET token = :t, failed_attempts = 0, locked_until = 0 WHERE id = :id"),
                         {"t": hash_token(token), "id": farmer_id},
                     )
-                    result = ("ok", (farmer_id, token))
+                    result = ("ok", (farmer_id, token, bool(must_change)))
                 elif failed + 1 >= MAX_TRIES:
                     await conn.execute(
                         text("UPDATE farmers SET failed_attempts = 0, locked_until = :lu WHERE id = :id"),
@@ -307,9 +311,11 @@ async def login(body: LoginIn):
     kind, data = result
     if kind == "locked":
         raise HTTPException(status_code=429, detail=f"Too many wrong tries. Try again in {data} minutes")
+    if kind == "expired":
+        raise HTTPException(status_code=403, detail="Temporary PIN expired. Ask your administrator for a new one")
     if kind == "bad":
         raise HTTPException(status_code=401, detail="Wrong phone number or PIN")
-    return {"farmer_id": data[0], "token": data[1]}
+    return {"farmer_id": data[0], "token": data[1], "must_change": data[2]}
 
 
 @app.post("/api/sync")
@@ -388,6 +394,8 @@ async def change_pin(body: ChangePinIn, farmer_id=Depends(current_farmer)):
         raise HTTPException(status_code=401, detail="Please log in")
     if not re.fullmatch(r"\d{4}", body.new_pin):
         raise HTTPException(status_code=400, detail="New PIN must be 4 digits")
+    if body.new_pin == body.old_pin:
+        raise HTTPException(status_code=400, detail="Choose a PIN different from the current one")
     ok = False
     async with engine.begin() as conn:
         row = (await conn.execute(
@@ -398,7 +406,7 @@ async def change_pin(body: ChangePinIn, farmer_id=Depends(current_farmer)):
         if ok:
             new_hash = await asyncio.to_thread(bcrypt.hashpw, body.new_pin.encode(), bcrypt.gensalt())
             await conn.execute(
-                text("UPDATE farmers SET pin_hash = :h WHERE id = :id"),
+                text("UPDATE farmers SET pin_hash = :h, must_change = 0, temp_expires = 0 WHERE id = :id"),
                 {"h": new_hash.decode(), "id": farmer_id},
             )
     if not ok:
