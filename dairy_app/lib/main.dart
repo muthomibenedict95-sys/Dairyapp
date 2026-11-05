@@ -450,6 +450,109 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
+  Future<void> accountMenu() async {
+    final choice = await showModalBottomSheet<String>(
+      context: context,
+      builder: (_) => SafeArea(
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          ListTile(
+            leading: const Icon(Icons.lock_reset),
+            title: const Text('Change PIN'),
+            onTap: () => Navigator.pop(context, 'pin'),
+          ),
+          ListTile(
+            leading: const Icon(Icons.logout),
+            title: const Text('Log out'),
+            onTap: () => Navigator.pop(context, 'logout'),
+          ),
+        ]),
+      ),
+    );
+    if (!mounted) return;
+    if (choice == 'pin') await changePin();
+    if (choice == 'logout') await logOut();
+  }
+
+  Future<void> logOut() async {
+    await load();
+    if (!mounted) return;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Log out?'),
+        content: Text(pending > 0
+            ? '$pending records are not synced yet. They stay on this phone and will sync after you log in again.'
+            : 'Your records stay on this phone. You will need your PIN to log in again.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Log out')),
+        ],
+      ),
+    );
+    if (ok == true) await setToken(null);
+  }
+
+  Future<void> changePin() async {
+    final oldC = TextEditingController();
+    final newC = TextEditingController();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Change PIN'),
+        content: Column(mainAxisSize: MainAxisSize.min, children: [
+          TextField(
+            controller: oldC,
+            keyboardType: TextInputType.number,
+            obscureText: true,
+            maxLength: 4,
+            decoration: const InputDecoration(labelText: 'Current PIN'),
+          ),
+          TextField(
+            controller: newC,
+            keyboardType: TextInputType.number,
+            obscureText: true,
+            maxLength: 4,
+            decoration: const InputDecoration(labelText: 'New 4-digit PIN'),
+          ),
+        ]),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Save')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    var msg = '';
+    if (!RegExp(r'^\d{4}$').hasMatch(newC.text.trim())) {
+      msg = 'New PIN must be 4 digits';
+    } else {
+      try {
+        final token = await getToken();
+        final res = await http
+            .post(
+              Uri.parse('${await getServerUrl()}/api/change_pin'),
+              headers: {'Content-Type': 'application/json', 'Authorization': 'Bearer $token'},
+              body: jsonEncode({'old_pin': oldC.text.trim(), 'new_pin': newC.text.trim()}),
+            )
+            .timeout(const Duration(seconds: 10));
+        if (res.statusCode == 200) {
+          msg = 'PIN changed';
+        } else if (res.statusCode == 403) {
+          msg = 'Current PIN is wrong';
+        } else if (res.statusCode == 401) {
+          msg = 'Please log in again';
+        } else {
+          msg = 'Could not change PIN (${res.statusCode})';
+        }
+      } catch (_) {
+        msg = 'Server not reachable';
+      }
+    }
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+    }
+  }
+
   Future<void> editServer() async {
     final c = TextEditingController(text: await getServerUrl());
     if (!mounted) return;
@@ -622,7 +725,7 @@ class _HomePageState extends State<HomePage> {
         padding: const EdgeInsets.all(14),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Row(children: [
-            const Icon(Icons.pets, size: 28),
+            const Text('🐄', style: TextStyle(fontSize: 28)),
             const SizedBox(width: 12),
             Expanded(
               child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -675,6 +778,11 @@ class _HomePageState extends State<HomePage> {
       appBar: AppBar(
         title: const Text('My Cows'),
         actions: [
+          IconButton(
+            tooltip: 'Account',
+            icon: const Icon(Icons.account_circle),
+            onPressed: accountMenu,
+          ),
           IconButton(
             tooltip: 'Reminders',
             icon: const Icon(Icons.notifications),
