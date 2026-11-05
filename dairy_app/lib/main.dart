@@ -991,6 +991,11 @@ class _LoginPageState extends State<LoginPage> {
         final body = jsonDecode(res.body);
         final token = body['token'] as String;
         final must = body['must_change'] == true;
+        final blocked = await claimPhoneFor(body['farmer_id'] as String);
+        if (blocked != null) {
+          setState(() => error = blocked);
+          return;
+        }
         // Claim everything already on this phone for this farmer.
         await db.update('cows', {'synced': 0});
         await db.update('milk', {'synced': 0});
@@ -1421,4 +1426,37 @@ class _ForcePinPageState extends State<ForcePinPage> {
           ),
         ),
       );
+}
+
+// ---------- one farmer per phone ----------
+Future<String?> getSetting(String key) async {
+  final r = await db.query('settings', where: 'key = ?', whereArgs: [key]);
+  return r.isEmpty ? null : r.first['value'] as String;
+}
+
+Future<void> setSetting(String key, String value) async {
+  await db.insert('settings', {'key': key, 'value': value},
+      conflictAlgorithm: ConflictAlgorithm.replace);
+}
+
+/// Returns an error message when another farmer's unsynced records block this
+/// login. Otherwise returns null. A different farmer logging in clears this
+/// phone's local copy: everything synced stays safe on the server.
+Future<String?> claimPhoneFor(String farmerId) async {
+  final owner = await getSetting('owner_id');
+  if (owner != null && owner != farmerId) {
+    final unsynced = Sqflite.firstIntValue(await db.rawQuery(
+            'SELECT (SELECT COUNT(*) FROM cows WHERE synced = 0) + '
+            '(SELECT COUNT(*) FROM milk WHERE synced = 0) + '
+            '(SELECT COUNT(*) FROM milk_use WHERE synced = 0)')) ??
+        0;
+    if (unsynced > 0) {
+      return 'This phone holds unsynced records of another farmer. Log in as that farmer and sync first.';
+    }
+    await db.delete('milk');
+    await db.delete('milk_use');
+    await db.delete('cows');
+  }
+  await setSetting('owner_id', farmerId);
+  return null;
 }
