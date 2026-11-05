@@ -912,6 +912,7 @@ Future<void> setToken(String? token) async {
 }
 
 Future<void> loadAuthState() async {
+  mustChange.value = await getFlag('must_change');
   authState.value = (await getToken()) != null;
 }
 
@@ -924,7 +925,11 @@ class AuthGate extends StatelessWidget {
           if (v == null) {
             return const Scaffold(body: Center(child: CircularProgressIndicator()));
           }
-          return v ? const HomePage() : const LoginPage();
+          if (!v) return const LoginPage();
+          return ValueListenableBuilder<bool>(
+            valueListenable: mustChange,
+            builder: (context, m, _) => m ? const ForcePinPage() : const HomePage(),
+          );
         },
       );
 }
@@ -983,11 +988,15 @@ class _LoginPageState extends State<LoginPage> {
           )
           .timeout(const Duration(seconds: 10));
       if (res.statusCode == 200) {
-        final token = jsonDecode(res.body)['token'] as String;
+        final body = jsonDecode(res.body);
+        final token = body['token'] as String;
+        final must = body['must_change'] == true;
         // Claim everything already on this phone for this farmer.
         await db.update('cows', {'synced': 0});
         await db.update('milk', {'synced': 0});
         await db.update('milk_use', {'synced': 0});
+        await setFlag('must_change', must);
+        mustChange.value = must;
         await setToken(token);
         return;
       }
@@ -1274,4 +1283,142 @@ Future<void> scheduleReminders() async {
       );
     }
   } catch (_) {}
+}
+
+// ---------- forced PIN change (after an admin reset) ----------
+final ValueNotifier<bool> mustChange = ValueNotifier<bool>(false);
+
+Future<bool> getFlag(String key) async {
+  final r = await db.query('settings', where: 'key = ?', whereArgs: [key]);
+  return r.isNotEmpty && r.first['value'] == '1';
+}
+
+Future<void> setFlag(String key, bool v) async {
+  await db.insert('settings', {'key': key, 'value': v ? '1' : '0'},
+      conflictAlgorithm: ConflictAlgorithm.replace);
+}
+
+class ForcePinPage extends StatefulWidget {
+  const ForcePinPage({super.key});
+  @override
+  State<ForcePinPage> createState() => _ForcePinPageState();
+}
+
+class _ForcePinPageState extends State<ForcePinPage> {
+  final oldC = TextEditingController();
+  final newC = TextEditingController();
+  final againC = TextEditingController();
+  bool busy = false;
+  String? error;
+
+  @override
+  void dispose() {
+    oldC.dispose();
+    newC.dispose();
+    againC.dispose();
+    super.dispose();
+  }
+
+  Future<void> submit() async {
+    final o = oldC.text.trim();
+    final n = newC.text.trim();
+    final a = againC.text.trim();
+    if (!RegExp(r'^\d{4}$').hasMatch(n)) {
+      setState(() => error = 'New PIN must be 4 digits');
+      return;
+    }
+    if (n != a) {
+      setState(() => error = 'The two new PINs do not match');
+      return;
+    }
+    if (n == o) {
+      setState(() => error = 'Choose a PIN different from the temporary one');
+      return;
+    }
+    setState(() {
+      busy = true;
+      error = null;
+    });
+    try {
+      final token = await getToken();
+      final res = await http
+          .post(
+            Uri.parse('${await getServerUrl()}/api/change_pin'),
+            headers: {'Content-Type': 'application/json', 'Authorization': 'Bearer $token'},
+            body: jsonEncode({'old_pin': o, 'new_pin': n}),
+          )
+          .timeout(const Duration(seconds: 10));
+      if (res.statusCode == 200) {
+        await setFlag('must_change', false);
+        mustChange.value = false;
+        return;
+      }
+      if (res.statusCode == 401) {
+        await setToken(null);
+        return;
+      }
+      String detail = 'Could not change PIN (${res.statusCode})';
+      if (res.statusCode == 403) {
+        detail = 'The temporary PIN is wrong';
+      }
+      setState(() => error = detail);
+    } catch (_) {
+      setState(() => error = 'Server not reachable. Try again when you are online.');
+    } finally {
+      if (mounted) setState(() => busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => PopScope(
+        canPop: false,
+        child: Scaffold(
+          appBar: AppBar(title: const Text('Choose a new PIN')),
+          body: ListView(
+            padding: const EdgeInsets.all(20),
+            children: [
+              const Text(
+                  'Your administrator gave you a temporary PIN. Choose your own 4-digit PIN to continue.'),
+              const SizedBox(height: 16),
+              TextField(
+                controller: oldC,
+                keyboardType: TextInputType.number,
+                obscureText: true,
+                maxLength: 4,
+                decoration: const InputDecoration(
+                    labelText: 'Temporary PIN', border: OutlineInputBorder()),
+              ),
+              TextField(
+                controller: newC,
+                keyboardType: TextInputType.number,
+                obscureText: true,
+                maxLength: 4,
+                decoration: const InputDecoration(
+                    labelText: 'New 4-digit PIN', border: OutlineInputBorder()),
+              ),
+              TextField(
+                controller: againC,
+                keyboardType: TextInputType.number,
+                obscureText: true,
+                maxLength: 4,
+                decoration: const InputDecoration(
+                    labelText: 'New PIN again', border: OutlineInputBorder()),
+              ),
+              if (error != null) ...[
+                const SizedBox(height: 8),
+                Text(error!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
+              ],
+              const SizedBox(height: 16),
+              FilledButton(
+                onPressed: busy ? null : submit,
+                child: Text(busy ? 'Please wait...' : 'Save new PIN'),
+              ),
+              TextButton(
+                onPressed: busy ? null : () => setToken(null),
+                child: const Text('Log out'),
+              ),
+            ],
+          ),
+        ),
+      );
 }
