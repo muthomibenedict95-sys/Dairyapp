@@ -800,7 +800,7 @@ class _HomePageState extends State<HomePage> {
         padding: const EdgeInsets.all(14),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Row(children: [
-            const Text('🐄', style: TextStyle(fontSize: 28)),
+            Text(category == 'bull' ? '🐂' : category == 'calf' ? '🐮' : '🐄', style: const TextStyle(fontSize: 28)),
             const SizedBox(width: 12),
             Expanded(
               child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -815,6 +815,7 @@ class _HomePageState extends State<HomePage> {
               onPressed: () => cowMenu(id, name, tag),
             ),
           ]),
+          if (givesMilk(category)) ...[
           const SizedBox(height: 10),
           Row(children: [
             slot('Morning', v('morning')),
@@ -842,6 +843,7 @@ class _HomePageState extends State<HomePage> {
               ),
             ),
           ]),
+          ],
         ]),
       ),
     );
@@ -907,6 +909,27 @@ class CowPage extends StatefulWidget {
 
 class _CowPageState extends State<CowPage> {
   List<Map<String, Object?>> records = [];
+  double avg = 0, lastDay = 0;
+  int dayCount = 0;
+
+  Widget summary() {
+    final low = dayCount >= 3 && lastDay <= avg * 0.8;
+    final drop = avg > 0 ? ((avg - lastDay) / avg * 100).round() : 0;
+    return Card(
+      margin: const EdgeInsets.all(12),
+      color: low ? Colors.red.shade50 : null,
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: dayCount < 3
+            ? const Text('Not enough data yet: the 7-day average needs at least 3 full days of records.')
+            : Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text('7-day average: ${avg.toStringAsFixed(1)} L per day', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                Text('Last full day: ${lastDay.toStringAsFixed(1)} L'),
+                if (low) Text('Low milk: $drop% below average. Check this cow.', style: TextStyle(color: Colors.red.shade700, fontWeight: FontWeight.bold)),
+              ]),
+      ),
+    );
+  }
 
   @override
   void initState() {
@@ -922,7 +945,26 @@ class _CowPageState extends State<CowPage> {
       orderBy: "date DESC, CASE session WHEN 'evening' THEN 3 WHEN 'midday' THEN 2 ELSE 1 END DESC",
     );
     if (!mounted) return;
-    setState(() => records = rows);
+    // Daily totals for completed days only (today is still in progress).
+    final totals = <String, double>{};
+    for (final r in rows) {
+      final d = '${r['date']}';
+      if (d == today()) continue;
+      totals[d] = (totals[d] ?? 0) + (r['litres'] as num).toDouble();
+    }
+    final days = totals.keys.toList()..sort((a, b) => b.compareTo(a));
+    final recent = days.take(7).toList();
+    var a = 0.0, last = 0.0;
+    if (recent.isNotEmpty) {
+      a = recent.map((d) => totals[d]!).reduce((x, y) => x + y) / recent.length;
+      last = totals[recent.first]!;
+    }
+    setState(() {
+      records = rows;
+      avg = a;
+      lastDay = last;
+      dayCount = recent.length;
+    });
   }
 
   @override
@@ -932,9 +974,10 @@ class _CowPageState extends State<CowPage> {
       body: records.isEmpty
           ? const Center(child: Text('No milk recorded yet.'))
           : ListView.builder(
-              itemCount: records.length,
+              itemCount: records.length + 1,
               itemBuilder: (context, i) {
-                final r = records[i];
+                if (i == 0) return summary();
+                final r = records[i - 1];
                 final session = '${r['session']}';
                 return ListTile(
                   leading: const Icon(Icons.water_drop),
