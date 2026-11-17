@@ -20,11 +20,17 @@ const defaultServerUrl = 'http://192.168.1.100:8000'; // change in the app (gear
 int nowMs() => DateTime.now().millisecondsSinceEpoch;
 String today() => DateTime.now().toIso8601String().substring(0, 10);
 
+// Category rules: one place decides what each category can have.
+const categories = ['cow', 'heifer', 'bull', 'calf'];
+bool hasCalving(String c) => c == 'cow';
+bool givesMilk(String c) => c == 'cow';
+String categoryLabel(String c) => c[0].toUpperCase() + c.substring(1);
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   db = await openDatabase(
     p.join(await getDatabasesPath(), 'dairy_v2.db'),
-    version: 4,
+    version: 5,
     onCreate: (d, v) async {
       // id is a UUID made on the phone; synced: 0 = pending, 1 = on server.
       await d.execute('''
@@ -35,6 +41,9 @@ Future<void> main() async {
           updated_at INTEGER NOT NULL,
           synced INTEGER NOT NULL DEFAULT 0,
           removed_reason TEXT NOT NULL DEFAULT '',
+          category TEXT NOT NULL DEFAULT 'cow',
+          birth_date TEXT NOT NULL DEFAULT '',
+          calving_date TEXT NOT NULL DEFAULT '',
           deleted INTEGER NOT NULL DEFAULT 0
         )''');
       await d.execute('''
@@ -65,6 +74,11 @@ Future<void> main() async {
       }
       if (oldV < 3) {
         await d.execute("ALTER TABLE cows ADD COLUMN removed_reason TEXT NOT NULL DEFAULT ''");
+      }
+      if (oldV < 5) {
+        await d.execute("ALTER TABLE cows ADD COLUMN category TEXT NOT NULL DEFAULT 'cow'");
+        await d.execute("ALTER TABLE cows ADD COLUMN birth_date TEXT NOT NULL DEFAULT ''");
+        await d.execute("ALTER TABLE cows ADD COLUMN calving_date TEXT NOT NULL DEFAULT ''");
       }
     },
   );
@@ -151,7 +165,7 @@ class DairyApp extends StatelessWidget {
   Widget build(BuildContext context) => MaterialApp(
         title: 'Dairy App',
         theme: ThemeData(colorSchemeSeed: Colors.green, useMaterial3: true),
-        home: const AuthGate(),
+        home: const HomePage(),
       );
 }
 
@@ -172,11 +186,6 @@ class _HomePageState extends State<HomePage> {
     super.initState();
     load();
     initReminders();
-    // Automatic sync whenever the phone gets a network connection.
-    _sub = Connectivity().onConnectivityChanged.listen((results) {
-      if (!results.contains(ConnectivityResult.none)) syncNow(silent: true);
-    });
-    syncNow(silent: true);
   }
 
   @override
@@ -187,7 +196,7 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> load() async {
     final rows = await db.rawQuery('''
-      SELECT c.id, c.name, c.tag,
+      SELECT c.id, c.name, c.tag, c.category,
         COALESCE(SUM(m.litres), 0) AS today,
         COALESCE(SUM(CASE WHEN m.session = 'morning' THEN m.litres END), 0) AS morning,
         COALESCE(SUM(CASE WHEN m.session = 'midday' THEN m.litres END), 0) AS midday,
@@ -213,28 +222,33 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> syncNow({bool silent = false}) async {
-    final msg = await SyncService.sync();
     await load();
-    if (!silent && mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
-    }
   }
 
   Future<void> addCow() async {
     final name = TextEditingController();
     final tag = TextEditingController();
+    String category = 'cow';
     final ok = await showDialog<bool>(
       context: context,
-      builder: (_) => AlertDialog(
-        title: const Text('Add cow'),
-        content: Column(mainAxisSize: MainAxisSize.min, children: [
-          TextField(controller: name, decoration: const InputDecoration(labelText: 'Name')),
-          TextField(controller: tag, decoration: const InputDecoration(labelText: 'Tag number')),
-        ]),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
-          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Save')),
-        ],
+      builder: (_) => StatefulBuilder(
+        builder: (context, setS) => AlertDialog(
+          title: const Text('Add animal'),
+          content: Column(mainAxisSize: MainAxisSize.min, children: [
+            TextField(controller: name, decoration: const InputDecoration(labelText: 'Name')),
+            TextField(controller: tag, decoration: const InputDecoration(labelText: 'Tag number')),
+            DropdownButtonFormField<String>(
+              initialValue: category,
+              decoration: const InputDecoration(labelText: 'Category'),
+              items: [for (final c in categories) DropdownMenuItem(value: c, child: Text(categoryLabel(c)))],
+              onChanged: (v) => setS(() => category = v!),
+            ),
+          ]),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+            FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Save')),
+          ],
+        ),
       ),
     );
     if (ok == true && name.text.trim().isNotEmpty) {
@@ -242,6 +256,7 @@ class _HomePageState extends State<HomePage> {
         'id': uuid.v4(),
         'name': name.text.trim(),
         'tag': tag.text.trim(),
+        'category': category,
         'updated_at': nowMs(),
         'synced': 0,
       });
@@ -645,6 +660,16 @@ class _HomePageState extends State<HomePage> {
     final spoiled = TextEditingController(text: show(field('spoiled', 'litres')));
     final price = TextEditingController(text: show(field('sold', 'price_per_litre')));
     if (!mounted) return;
+    final left = ValueNotifier<double>(produced);
+    void refresh() {
+      double n(TextEditingController c) =>
+          double.tryParse(c.text.trim().replaceAll(',', '.')) ?? 0.0;
+      left.value = produced - (n(household) + n(sold) + n(spoiled));
+    }
+    for (final c in [household, sold, spoiled]) {
+      c.addListener(refresh);
+    }
+    refresh();
     final ok = await showDialog<bool>(
       context: context,
       builder: (_) => AlertDialog(
@@ -652,6 +677,17 @@ class _HomePageState extends State<HomePage> {
         content: SingleChildScrollView(
           child: Column(mainAxisSize: MainAxisSize.min, children: [
             Text('Milk recorded today: ${produced.toStringAsFixed(1)} L'),
+            ValueListenableBuilder<double>(
+              valueListenable: left,
+              builder: (_, l, _) => Text(
+                l < -0.05
+                    ? 'Too much: ${(-l).toStringAsFixed(1)} L more than was recorded. Reduce the amounts.'
+                    : 'Left to account for: ${l.toStringAsFixed(1)} L',
+                style: TextStyle(
+                    fontWeight: FontWeight.bold,
+                    color: l < -0.05 ? Colors.red.shade700 : Colors.green.shade800),
+              ),
+            ),
             const SizedBox(height: 12),
             useField(household, 'Used in the household (L)'),
             const SizedBox(height: 8),
@@ -664,7 +700,7 @@ class _HomePageState extends State<HomePage> {
         ),
         actions: [
           TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
-          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Save')),
+          ValueListenableBuilder<double>(valueListenable: left, builder: (_, l, _) => FilledButton(onPressed: l < -0.05 ? null : () => Navigator.pop(context, true), child: const Text('Save'))),
         ],
       ),
     );
@@ -687,6 +723,14 @@ class _HomePageState extends State<HomePage> {
       }
       return;
     }
+    final accounted = hVal + sVal + spVal;
+    if (accounted > produced + 0.05) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text('That is ${accounted.toStringAsFixed(1)} L but only ${produced.toStringAsFixed(1)} L was recorded today')));
+      }
+      return;
+    }
     await saveMilkUse('household', hVal, null);
     await saveMilkUse('sold', sVal, prVal > 0 ? prVal : null);
     await saveMilkUse('spoiled', spVal, null);
@@ -698,6 +742,7 @@ class _HomePageState extends State<HomePage> {
     final id = '${c['id']}';
     final name = '${c['name']}';
     final tag = '${c['tag']}';
+    final category = '${c['category'] ?? 'cow'}';
     double v(String k) => (c[k] as num).toDouble();
 
     Widget slot(String label, double litres) {
@@ -731,6 +776,7 @@ class _HomePageState extends State<HomePage> {
               child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                 Text(name, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
                 if (tag.isNotEmpty) Text('Tag $tag', style: const TextStyle(fontSize: 14)),
+                Text(categoryLabel(category), style: const TextStyle(fontSize: 14, color: Colors.black54)),
               ]),
             ),
             IconButton(
@@ -749,7 +795,7 @@ class _HomePageState extends State<HomePage> {
           Row(children: [
             Expanded(
               child: FilledButton.icon(
-                onPressed: () => addMilk(id, name),
+                onPressed: givesMilk(category) ? () => addMilk(id, name) : null,
                 icon: const Icon(Icons.add),
                 label: const Text('Add milk'),
               ),
@@ -779,28 +825,9 @@ class _HomePageState extends State<HomePage> {
         title: const Text('My Cows'),
         actions: [
           IconButton(
-            tooltip: 'Account',
-            icon: const Icon(Icons.account_circle),
-            onPressed: accountMenu,
-          ),
-          IconButton(
             tooltip: 'Reminders',
             icon: const Icon(Icons.notifications),
             onPressed: remindersInfo,
-          ),
-          IconButton(
-            tooltip: 'Server address',
-            icon: const Icon(Icons.settings),
-            onPressed: editServer,
-          ),
-          IconButton(
-            tooltip: 'Sync now',
-            onPressed: () => syncNow(),
-            icon: Badge(
-              isLabelVisible: pending > 0,
-              label: Text('$pending'),
-              child: const Icon(Icons.cloud_upload),
-            ),
           ),
         ],
       ),
@@ -815,8 +842,7 @@ class _HomePageState extends State<HomePage> {
           padding: const EdgeInsets.all(16),
           color: Theme.of(context).colorScheme.primaryContainer,
           child: Text(
-            "Today's milk: ${total.toStringAsFixed(1)} L"
-            '${pending > 0 ? '   •   $pending waiting to sync' : '   •   all synced'}',
+            "Today's milk: ${total.toStringAsFixed(1)} L",
             style: Theme.of(context).textTheme.titleMedium,
           ),
         ),
