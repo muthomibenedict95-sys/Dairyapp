@@ -274,7 +274,17 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> addMilk(String cowId, String cowName) async {
     final litres = TextEditingController();
+    const dayLabels = ['Today', 'Yesterday', '2 days ago'];
+    var daysBack = 0;
     var session = defaultSession();
+    String dayOf(int back) =>
+        DateTime.now().subtract(Duration(days: back)).toIso8601String().substring(0, 10);
+    // A session is open once its start time has passed; past days are fully open.
+    bool isOpen(String s) {
+      if (daysBack > 0) return true;
+      final h = DateTime.now().hour;
+      return s == 'morning' || (s == 'midday' && h >= 10) || (s == 'evening' && h >= 15);
+    }
     final ok = await showDialog<bool>(
       context: context,
       builder: (_) => StatefulBuilder(
@@ -282,13 +292,31 @@ class _HomePageState extends State<HomePage> {
           title: Text('Milk from $cowName'),
           content: Column(mainAxisSize: MainAxisSize.min, children: [
             Wrap(spacing: 8, children: [
+              for (var i = 0; i < dayLabels.length; i++)
+                ChoiceChip(
+                  label: Text(dayLabels[i]),
+                  selected: daysBack == i,
+                  onSelected: (_) => setLocal(() {
+                    daysBack = i;
+                    if (!isOpen(session)) session = 'morning';
+                  }),
+                ),
+            ]),
+            const SizedBox(height: 8),
+            Wrap(spacing: 8, children: [
               for (final s in ['morning', 'midday', 'evening'])
                 ChoiceChip(
                   label: Text(s[0].toUpperCase() + s.substring(1)),
                   selected: session == s,
-                  onSelected: (_) => setLocal(() => session = s),
+                  onSelected: isOpen(s) ? (_) => setLocal(() => session = s) : null,
                 ),
             ]),
+            if (daysBack == 0)
+              const Padding(
+                padding: EdgeInsets.only(top: 6),
+                child: Text('Midday opens at 10:00, evening at 15:00',
+                    style: TextStyle(fontSize: 12, color: Colors.black54)),
+              ),
             TextField(
               controller: litres,
               keyboardType: const TextInputType.numberWithOptions(decimal: true),
@@ -309,9 +337,11 @@ class _HomePageState extends State<HomePage> {
           const SnackBar(content: Text('Enter litres between 0 and 50')));
       return;
     }
+    final date = dayOf(daysBack);
+    final when = daysBack == 0 ? '' : ' for ${dayLabels[daysBack].toLowerCase()}';
     final existing = await db.query('milk',
         where: 'cow_id = ? AND session = ? AND date = ? AND deleted = 0',
-        whereArgs: [cowId, session, today()]);
+        whereArgs: [cowId, session, date]);
     String msg;
     if (existing.isEmpty) {
       await db.insert('milk', {
@@ -319,17 +349,17 @@ class _HomePageState extends State<HomePage> {
         'cow_id': cowId,
         'litres': value,
         'session': session,
-        'date': today(),
+        'date': date,
         'updated_at': nowMs(),
         'synced': 0,
         'deleted': 0,
       });
-      msg = 'Saved $session milk';
+      msg = 'Saved $session milk$when';
     } else {
       await db.update('milk',
           {'litres': value, 'updated_at': nowMs(), 'synced': 0},
           where: 'id = ?', whereArgs: [existing.first['id']]);
-      msg = 'Updated $session milk (was ${existing.first['litres']} L)';
+      msg = 'Updated $session milk$when (was ${existing.first['litres']} L)';
     }
     await load();
     if (mounted) {
